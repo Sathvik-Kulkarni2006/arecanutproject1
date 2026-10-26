@@ -1,70 +1,207 @@
+
 const express = require("express");
 const path = require("path");
+const cors = require("cors");
+
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Allow your GitHub Pages website and local development.
+app.use(cors({
+  origin: [
+    "https://YOUR-GITHUB-USERNAME.github.io",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500"
+  ]
+}));
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-// Demo values. Replace with readings received from your central ESP32.
+// API key: configure DEVICE_API_KEY in Render environment variables.
+// ESP32s must send this key in the x-device-key header.
+const DEVICE_API_KEY = process.env.DEVICE_API_KEY || "";
+
 const state = {
   system: "online",
-  communication: "ESP-NOW",
-  lastUpdate: new Date().toISOString(),
+  communication: "Wi-Fi / HTTP",
+  lastUpdate: null,
   rows: {
-    row1: { id: 1, moisture: 32, threshold: 45, valve: "OPEN", sensorOnline: true, receivedFrom: "demo" },
-    row2: { id: 2, moisture: 68, threshold: 45, valve: "CLOSED", sensorOnline: true, receivedFrom: "demo" }
+    row1: {
+      id: 1,
+      moisture: null,
+      threshold: 35,
+      valve: "CLOSED",
+      sensorOnline: false,
+      receivedFrom: null
+    },
+    row2: {
+      id: 2,
+      moisture: null,
+      threshold: 35,
+      valve: "CLOSED",
+      sensorOnline: false,
+      receivedFrom: null
+    }
   },
   history: []
 };
 
-function applyMoisture(rowKey, moisture, source = "api") {
-  if (!state.rows[rowKey]) throw new Error("rowKey must be row1 or row2");
-  const row = state.rows[rowKey];
-  row.moisture = Math.max(0, Math.min(100, Number(moisture)));
-  // Illustrative threshold logic; tune for your crop, soil and sensor calibration.
-  row.valve = row.moisture < row.threshold ? "OPEN" : "CLOSED";
-  row.sensorOnline = true;
-  row.receivedFrom = source;
-  state.lastUpdate = new Date().toISOString();
-  state.history.unshift({ at: state.lastUpdate, row: rowKey, moisture: row.moisture, valve: row.valve });
-  state.history = state.history.slice(0, 30);
+function checkDeviceKey(req, res, next) {
+  if (!DEVICE_API_KEY) {
+    return res.status(503).json({
+      ok: false,
+      error: "DEVICE_API_KEY is not configured on the server."
+    });
+  }
+
+  if (req.get("x-device-key") !== DEVICE_API_KEY) {
+    return res.status(401).json({
+      ok: false,
+      error: "Invalid device API key."
+    });
+  }
+
+  next();
 }
 
-app.get("/api/status", (req, res) => res.json(state));
+function applyMoisture(rowKey, moisture, raw, source = "esp32") {
+  if (!state.rows[rowKey]) {
+    throw new Error("deviceId must be row1 or row2");
+  }
 
-// Central controller / test simulator posts both row moisture values here.
-app.post("/api/readings", (req, res) => {
-  const { row1, row2 } = req.body || {};
-  try {
-    if (row1 !== undefined) applyMoisture("row1", row1, "central-esp32");
-    if (row2 !== undefined) applyMoisture("row2", row2, "central-esp32");
-    res.json({ ok: true, state });
-  } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+  const value = Number(moisture);
+
+  if (!Number.isFinite(value) || value < 0 || value > 100) {
+    throw new Error("Moisture must be a number between 0 and 100");
+  }
+
+  const row = state.rows[rowKey];
+
+  row.moisture = value;
+  row.valve = value < row.threshold ? "OPEN" : "CLOSED";
+  row.sensorOnline = true;
+  row.receivedFrom = source;
+  row.lastUpdate = new Date().toISOString();
+
+  state.lastUpdate = row.lastUpdate;
+
+  state.history.unshift({
+    at: row.lastUpdate,
+    row: rowKey,
+    moisture: value,
+    raw: raw ?? null,
+    valve: row.valve
+  });
+
+  state.history = state.history.slice(0, 1000);
+}
+
+// Health check: supports both /health and /api/health.
+app.get(["/health", "/api/health"], (req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: "arecanut-irrigation-backend"
+  });
 });
 
-// Optional manual override for demo/testing only.
+// Get both rows' latest readings.
+app.get("/api/status", (req, res) => {
+  res.json(state);
+});
+
+// ESP32 posts one row using deviceId, moisture, raw, valveOn.
+// Also supports a central controller posting { row1, row2 }.
+app.post("/api/readings", checkDeviceKey, (req, res) => {
+  try {
+    const body = req.body || {};
+
+    if (body.deviceId !== undefined) {
+      const id = String(body.deviceId).toLowerCase();
+
+      if (!["row1", "row2"].includes(id)) {
+        return res.status(400).json({
+          ok: false,
+          error: "deviceId must be row1 or row2"
+        });
+      }
+
+      applyMoisture(id, body.moisture, body.raw, "esp32");
+
+      // Reflect actual valve feedback if hardware provides it.
+      // Otherwise the backend calculates the recommended valve state.
+      if (typeof body.valveOn === "boolean") {
+        state.rows[id].valve = body.valveOn ? "OPEN" : "CLOSED";
+      }
+    } else {
+      if (body.row1 !== undefined) {
+        applyMoisture("row1", body.row1, null, "central-esp32");
+      }
+
+      if (body.row2 !== undefined) {
+        applyMoisture("row2", body.row2, null, "central-esp32");
+      }
+
+      if (body.row1 === undefined && body.row2 === undefined) {
+        return res.status(400).json({
+          ok: false,
+          error: "Provide deviceId and moisture, or row1/row2 values."
+        });
+      }
+    }
+
+    res.json({ ok: true, state });
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message
+    });
+  }
+});
+
+// Optional demo route. Protect it with an API key too.
+app.post("/api/demo/tick", checkDeviceKey, (req, res) => {
+  for (const key of ["row1", "row2"]) {
+    const current = state.rows[key].moisture ?? 50;
+    const next = key === "row1"
+      ? Math.max(0, current - 2)
+      : Math.min(100, current + 1);
+
+    applyMoisture(key, next, null, "demo");
+  }
+
+  res.json({ ok: true, state });
+});
+
+// Manual dashboard valve override.
+// This changes backend state only; it does not operate a physical valve
+// unless you implement a command-polling mechanism in the ESP32 firmware.
 app.post("/api/valve/:row/:action", (req, res) => {
-  const key = req.params.row.toLowerCase() === "row1" ? "row1" :
-              req.params.row.toLowerCase() === "row2" ? "row2" : null;
+  const key = req.params.row.toLowerCase();
   const action = req.params.action.toUpperCase();
-  if (!key || !["OPEN", "CLOSED"].includes(action))
-    return res.status(400).json({ ok: false, error: "Use row1/row2 and open/closed." });
+
+  if (!state.rows[key] || !["OPEN", "CLOSED"].includes(action)) {
+    return res.status(400).json({
+      ok: false,
+      error: "Use row1/row2 and open/closed."
+    });
+  }
+
   state.rows[key].valve = action;
   state.lastUpdate = new Date().toISOString();
-  state.history.unshift({ at: state.lastUpdate, row: key, moisture: state.rows[key].moisture, valve: action, manual: true });
+
   res.json({ ok: true, state });
 });
 
-// Simulated changes so the dashboard works before hardware is connected.
-app.post("/api/demo/tick", (req, res) => {
-  for (const key of ["row1", "row2"]) {
-    const current = state.rows[key].moisture;
-    const next = key === "row1" ? Math.max(20, current - 2) : Math.min(80, current + 1);
-    applyMoisture(key, next, "demo");
-  }
-  res.json({ ok: true, state });
+// Basic root response for deployment checks.
+app.get("/", (req, res, next) => {
+  const indexPath = path.join(__dirname, "public", "index.html");
+
+  res.sendFile(indexPath, (err) => {
+    if (err) next();
+  });
 });
 
-app.get("/api/health", (req, res) => res.json({ ok: true, service: "arecanut-irrigation-backend" }));
-app.listen(PORT, () => console.log(`Dashboard running at http://localhost:${PORT}`));
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Arecanut irrigation backend listening on port ${PORT}`);
+});
