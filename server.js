@@ -22,31 +22,30 @@ app.use(express.static(path.join(__dirname, "public")));
 // ESP32s must send this key in the x-device-key header.
 const DEVICE_API_KEY = process.env.DEVICE_API_KEY || "";
 
-const state = {
+  const state = {
   system: "online",
-  communication: "Wi-Fi / HTTP",
-  lastUpdate: null,
+  communication: "Wi-Fi / HTTPS",
+  lastUpdate: new Date().toISOString(),
   rows: {
     row1: {
       id: 1,
-      moisture: null,
+      moisture: 32,
       threshold: 35,
-      valve: "CLOSED",
+      valve: "OPEN",
       sensorOnline: false,
-      receivedFrom: null
+      receivedFrom: "demo"
     },
     row2: {
       id: 2,
-      moisture: null,
+      moisture: 68,
       threshold: 35,
       valve: "CLOSED",
       sensorOnline: false,
-      receivedFrom: null
+      receivedFrom: "demo"
     }
   },
   history: []
 };
-
 function checkDeviceKey(req, res, next) {
   if (!DEVICE_API_KEY) {
     return res.status(503).json({
