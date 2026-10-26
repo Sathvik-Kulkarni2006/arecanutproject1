@@ -1,52 +1,119 @@
+
+const API_BASE = "https://arecanutproject1.onrender.com";
 const $ = id => document.getElementById(id);
-function fmtTime(value) { try { return new Date(value).toLocaleString(); } catch { return value || "—"; } }
+
+function fmtTime(value) {
+  return value ? new Date(value).toLocaleString() : "—";
+}
+
 function paintRow(key, row) {
+  if (!row || row.moisture == null) return;
+
+  const moisture = Number(row.moisture);
+  const threshold = Number(row.threshold ?? 35);
+  const valve = row.valve || "CLOSED";
   const n = key === "row1" ? "1" : "2";
-  $(`${key}Big`).innerHTML = `${row.moisture}<span>%</span>`;
-  $(`${key}Bar`).style.width = `${row.moisture}%`;
-  $(`${key}Valve`).textContent = row.valve;
-  $(`${key}Threshold`).textContent = `${row.threshold}%`;
-  const dry = row.moisture < row.threshold;
+
+  $(`${key}Big`).innerHTML = `${moisture}<span>%</span>`;
+  $(`${key}Bar`).style.width = `${Math.max(0, Math.min(100, moisture))}%`;
+  $(`${key}Valve`).textContent = valve;
+  $(`${key}Threshold`).textContent = `${threshold}%`;
+
+  const dry = moisture < threshold;
   $(`${key}Pill`).textContent = dry ? "WATER NEEDED" : "MOISTURE OK";
   $(`${key}Pill`).className = `pill ${dry ? "dry" : "good"}`;
-  $(`fieldMoist${n}`).textContent = `${row.moisture}% moisture`;
-  $(`fieldNeed${n}`).textContent = dry ? "Dry · watering needed" : "Moisture OK";
-  $(`fieldValve${n}`).textContent = `VALVE ${row.valve}`;
-  $(`fieldValve${n}`).parentElement.classList.toggle("closed", row.valve !== "OPEN");
+
+  $(`fieldMoist${n}`).textContent = `${moisture}% moisture`;
+  $(`fieldNeed${n}`).textContent = dry
+    ? "Dry · watering needed"
+    : "Moisture OK";
+  $(`fieldValve${n}`).textContent = `VALVE ${valve}`;
+  $(`fieldValve${n}`).parentElement.classList.toggle(
+    "closed", valve !== "OPEN"
+  );
 }
+
 function paintHistory(history) {
   const rows = history || [];
-  $("historyBody").innerHTML = rows.length ? rows.slice(0,10).map(h =>
-    `<tr><td>${fmtTime(h.at)}</td><td>${h.row === "row1" ? "Row 01" : "Row 02"}</td><td>${h.moisture}%</td><td>${h.valve}</td><td>${h.manual ? "Manual demo" : h.row ? "ESP32 / demo" : "—"}</td></tr>`
-  ).join("") : '<tr><td colspan="5">No readings received yet.</td></tr>';
+
+  $("historyBody").innerHTML = rows.length
+    ? rows.slice(0, 10).map(h => `
+      <tr>
+        <td>${fmtTime(h.at)}</td>
+        <td>${h.row === "row1" ? "Row 01" : "Row 02"}</td>
+        <td>${h.moisture}%</td>
+        <td>${h.valve || "—"}</td>
+        <td>${h.receivedFrom || (h.manual ? "Manual demo" : "ESP32 / demo")}</td>
+      </tr>
+    `).join("")
+    : '<tr><td colspan="5">No readings received yet.</td></tr>';
 }
+
 async function refresh() {
   try {
-    const r = await fetch("/api/status"); if (!r.ok) throw new Error("API unavailable");
-    const s = await r.json();
-    paintRow("row1", s.rows.row1); paintRow("row2", s.rows.row2);
+    const response = await fetch(`${API_BASE}/api/status`);
+    if (!response.ok) throw new Error("Backend request failed");
+
+    const s = await response.json();
+
+    paintRow("row1", s.rows?.row1);
+    paintRow("row2", s.rows?.row2);
+
     $("lastUpdate").textContent = fmtTime(s.lastUpdate);
-    $("rowsOnline").textContent = `${Number(s.rows.row1.sensorOnline)+Number(s.rows.row2.sensorOnline)} / 2`;
-    $("apiStatus").textContent = "ONLINE"; $("systemStatus").textContent = "SYSTEM ONLINE";
+
+    const online = [s.rows?.row1, s.rows?.row2]
+      .filter(row => row?.sensorOnline === true).length;
+
+    $("rowsOnline").textContent = `${online} / 2`;
+    $("apiStatus").textContent = "ONLINE";
+    $("systemStatus").textContent = "BACKEND ONLINE";
+
     paintHistory(s.history);
-  } catch(e) { $("apiStatus").textContent = "OFFLINE"; $("systemStatus").textContent = "BACKEND OFFLINE"; }
+  } catch (error) {
+    $("apiStatus").textContent = "OFFLINE";
+    $("systemStatus").textContent = "BACKEND CONNECTION ERROR";
+    console.error("Dashboard refresh failed:", error);
+  }
 }
-$("moistureInput").addEventListener("input", e => $("rangeValue").textContent = `${e.target.value}%`);
+
+// Moisture slider display
+$("moistureInput").addEventListener("input", e => {
+  $("rangeValue").textContent = `${e.target.value}%`;
+});
+
+// Row selection
 $("rowSelect").addEventListener("change", () => {
   const key = $("rowSelect").value;
-  $("moistureInput").value = key === "row1" ? $("row1Big").textContent.replace("%","") : $("row2Big").textContent.replace("%","");
-  $("rangeValue").textContent = `${$("moistureInput").value}%`;
+  const value = $( `${key}Big`).textContent.replace("%", "");
+
+  if (value && value !== "null") {
+    $("moistureInput").value = value;
+    $("rangeValue").textContent = `${value}%`;
+  }
 });
-$("sendReading").addEventListener("click", async () => {
-  const key = $("rowSelect").value, value = Number($("moistureInput").value);
-  const payload = key === "row1" ? {row1:value} : {row2:value};
-  await fetch("/api/readings", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
-  await refresh();
+
+// These controls are not connected to physical hardware.
+// Backend write requests need the configured device API key.
+$("sendReading").addEventListener("click", () => {
+  alert("Demo writing is temporarily disabled. First verify the live backend connection.");
 });
-$("simulate").addEventListener("click", async () => {
-  await fetch("/api/demo/tick", {method:"POST"}); await refresh();
+
+$("simulate").addEventListener("click", () => {
+  alert("Simulation is temporarily disabled. First verify the live backend connection.");
 });
+
+// Draw the trees once
 document.querySelectorAll(".trees").forEach(el => {
-  for (let i=0;i<11;i++) { const tree=document.createElement("span"); tree.className="tree"; el.appendChild(tree); }
+  if (el.children.length === 0) {
+    for (let i = 0; i < 11; i++) {
+      const tree = document.createElement("span");
+      tree.className = "tree";
+      el.appendChild(tree);
+    }
+  }
 });
-refresh(); setInterval(refresh, 2500);
+
+// Refresh dashboard every 3 seconds
+refresh();
+setInterval(refresh, 3000);
+```
